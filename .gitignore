@@ -1,0 +1,10 @@
+.env
+__pycache__/
+*.pyc
+data/
+uploads/
+archive/
+debug/
+node_modules/
+dist/
+.vscode/

@@ -1,0 +1,39 @@
+services:
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: finance
+      POSTGRES_USER: finance
+      POSTGRES_PASSWORD: finance_dev_password
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  backend:
+    build: ./backend
+    environment:
+      DATABASE_URL: postgresql://finance:finance_dev_password@db:5432/finance
+      UPLOAD_DIR: /data/uploads
+      ARCHIVE_DIR: /data/archive
+      DEBUG_DIR: /data/debug
+      OFFLINE_MODE: "true"
+      JWT_SECRET: "vX4EGzAE03GPHO1uHUsKBsJ2vgQsoO7AzGBCK3ir1Pg"
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./data:/data
+      - ./backend:/app
+    depends_on:
+      - db
+
+  adminer:
+    image: adminer
+    ports:
+      - "8080:8080"
+    depends_on:
+      - db
+
+volumes:
+  postgres_data:
+
