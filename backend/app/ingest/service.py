@@ -1,11 +1,12 @@
 import hashlib
 import re
-from typing import Dict
+from typing import Dict, Optional
 
 from sqlalchemy.orm import Session
 
-from ..models import BankAccount, Import, Transaction
+from ..models import BankAccount, Import, Merchant, Transaction
 from ..categorize.engine import categorize_transaction
+from ..categorize.merchant import extract_merchant_key
 from .registry import get_parser
 
 
@@ -21,6 +22,41 @@ def _compute_fingerprint(posted_date, amount, description: str) -> str:
     normalized_desc = _normalize_description(description)
     fingerprint_input = f"{posted_date.isoformat()}|{amount}|{normalized_desc}"
     return hashlib.sha256(fingerprint_input.encode("utf-8")).hexdigest()
+
+
+def _get_or_create_merchant(
+    db: Session,
+    household_id: int,
+    merchant_key: str,
+) -> Optional[Merchant]:
+    """
+    Get existing merchant or create a new one.
+    Upserts by (household_id, merchant_key).
+    """
+    if not merchant_key or merchant_key == "UNKNOWN":
+        return None
+
+    merchant = (
+        db.query(Merchant)
+        .filter(
+            Merchant.household_id == household_id,
+            Merchant.merchant_key == merchant_key,
+        )
+        .first()
+    )
+
+    if merchant:
+        return merchant
+
+    # Create new merchant
+    merchant = Merchant(
+        household_id=household_id,
+        merchant_key=merchant_key,
+        display_name=merchant_key,  # Start with key as display name
+    )
+    db.add(merchant)
+    db.flush()  # Get the ID without committing
+    return merchant
 
 
 def ingest_import(db: Session, import_id: int) -> Dict:
@@ -96,19 +132,46 @@ def ingest_import(db: Session, import_id: int) -> Dict:
 
         # Insert new transaction with auto-categorization
         category_id = None
+        merchant_key = None
+        merchant_id = None
+        merchant_record = None
+
         if household_id:
-            category_id = categorize_transaction(
-                db=db,
-                household_id=household_id,
-                description=txn.description,
-                merchant=txn.merchant if hasattr(txn, "merchant") else None,
+            # Extract and normalize merchant
+            merchant_key = extract_merchant_key(txn.description)
+
+            # Get or create merchant record
+            merchant_record = _get_or_create_merchant(
+                db, household_id, merchant_key
             )
+            if merchant_record:
+                merchant_id = merchant_record.id
+
+            # Determine category_id:
+            # 1) Use merchant's default_category_id if set
+            # 2) Otherwise, apply category rules via categorize_transaction
+            if merchant_record and merchant_record.default_category_id:
+                category_id = merchant_record.default_category_id
+            else:
+                category_id = categorize_transaction(
+                    db=db,
+                    household_id=household_id,
+                    description=txn.description,
+                    merchant=merchant_record.display_name if merchant_record else merchant_key,
+                    merchant_id=merchant_id,
+                    merchant_key=merchant_key,
+                )
 
         transaction = Transaction(
             bank_account_id=import_record.bank_account_id,
             import_id=import_record.id,
             posted_date=txn.posted_date,
             description=txn.description,
+            merchant=merchant_record.display_name if merchant_record else (
+                txn.merchant if hasattr(txn, "merchant") else None
+            ),
+            merchant_key=merchant_key,
+            merchant_id=merchant_id,
             amount=txn.amount,
             fingerprint=fingerprint,
             category_id=category_id,

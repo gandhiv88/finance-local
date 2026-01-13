@@ -3,7 +3,7 @@ from typing import Optional
 
 from sqlalchemy.orm import Session
 
-from ..models import Category, CategoryRule, MerchantOverride
+from ..models import Category, CategoryRule, Merchant, MerchantOverride
 
 
 # Common prefixes to strip from merchant names
@@ -64,6 +64,8 @@ def categorize_transaction(
     household_id: int,
     description: str,
     merchant: Optional[str] = None,
+    merchant_id: Optional[int] = None,
+    merchant_key: Optional[str] = None,
 ) -> Optional[int]:
     """
     Categorize a transaction based on household rules.
@@ -71,14 +73,40 @@ def categorize_transaction(
     Returns category_id or None if no match found.
     
     Order of precedence:
-    1. Merchant override (exact match on normalized merchant_key)
-    2. Category rules (enabled, ordered by priority ascending)
-    3. None (no match - default rules removed since we need category_id)
+    1. Merchant default_category_id (by merchant_id or merchant_key lookup)
+    2. MerchantOverride (backward compatibility, exact match on merchant_key)
+    3. Category rules (enabled, ordered by priority ascending)
+    4. None (no match)
     """
-    # Normalize merchant for matching
-    merchant_key = normalize_merchant_key(merchant or description)
+    # 1. Check Merchant default_category_id
+    if merchant_id:
+        # Direct lookup by merchant_id
+        merchant_record = (
+            db.query(Merchant)
+            .filter(Merchant.id == merchant_id)
+            .first()
+        )
+        if merchant_record and merchant_record.default_category_id:
+            return merchant_record.default_category_id
     
-    # 1. Check merchant overrides (exact match)
+    # Compute merchant_key if not provided
+    if not merchant_key:
+        merchant_key = normalize_merchant_key(merchant or description)
+    
+    # Lookup by merchant_key
+    if merchant_key:
+        merchant_record = (
+            db.query(Merchant)
+            .filter(
+                Merchant.household_id == household_id,
+                Merchant.merchant_key == merchant_key,
+            )
+            .first()
+        )
+        if merchant_record and merchant_record.default_category_id:
+            return merchant_record.default_category_id
+    
+    # 2. Check MerchantOverride (backward compatibility)
     if merchant_key:
         override = (
             db.query(MerchantOverride)
@@ -91,7 +119,7 @@ def categorize_transaction(
         if override and override.category_id:
             return override.category_id
     
-    # 2. Check household category rules
+    # 3. Check household category rules
     rules = (
         db.query(CategoryRule)
         .filter(
@@ -113,7 +141,7 @@ def categorize_transaction(
             # Invalid regex, skip this rule
             continue
     
-    # 3. No match found
+    # 4. No match found
     return None
 
 
