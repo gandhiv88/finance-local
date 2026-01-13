@@ -24,15 +24,11 @@ services:
       - /volume1/finance-local/data:/data
     depends_on:
       - db
-    ports:
-      - "8000:8000"
     restart: unless-stopped
 
   frontend:
     build:
       context: ./frontend
-    ports:
-      - "3000:80"
     depends_on:
       - backend
     restart: unless-stopped
