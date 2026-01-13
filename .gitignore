@@ -8,3 +8,6 @@ debug/
 node_modules/
 dist/
 .vscode/
+data/
+*.pdf
+
