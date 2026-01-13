@@ -167,8 +167,11 @@ export function CategoriesPage() {
             sx={{ minWidth: 180 }}
           />
           <Select
-            value={createParent ?? ""}
-            onChange={(e) => setCreateParent(e.target.value === "" ? "" : Number(e.target.value))}
+            value={createParent === null ? "" : String(createParent)}
+            onChange={(e) => {
+              const val = e.target.value;
+              setCreateParent(val === "" ? null : Number(val));
+            }}
             displayEmpty
             size="small"
             sx={{ minWidth: 180 }}
@@ -232,8 +235,11 @@ export function CategoriesPage() {
             sx={{ mb: 2 }}
           />
           <Select
-            value={editParent ?? ""}
-            onChange={(e) => setEditParent(e.target.value === "" ? "" : Number(e.target.value))}
+            value={editParent === null ? "" : String(editParent)}
+            onChange={(e) => {
+              const val = e.target.value;
+              setEditParent(val === "" ? null : Number(val));
+            }}
             displayEmpty
             fullWidth
             sx={{ mb: 2 }}
