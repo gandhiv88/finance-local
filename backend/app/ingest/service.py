@@ -62,16 +62,7 @@ def _get_or_create_merchant(
 def ingest_import(db: Session, import_id: int) -> Dict:
     """
     Process an import: parse PDF and insert transactions.
-
-    Args:
-        db: Database session
-        import_id: ID of the Import record to process
-
-    Returns:
-        Dict with imported_count, skipped_count, warning_count
-
-    Raises:
-        ValueError: If import not found or bank code unsupported
+    After commit, recategorize all newly inserted uncategorized transactions.
     """
     # Load Import record
     import_record = db.query(Import).filter(Import.id == import_id).first()
@@ -188,9 +179,34 @@ def ingest_import(db: Session, import_id: int) -> Dict:
 
     db.commit()
 
+    # --- Automatic recategorization of uncategorized transactions ---
+    # Find all uncategorized transactions from this import
+    uncategorized = db.query(Transaction).filter(
+        Transaction.import_id == import_id,
+        Transaction.category_id.is_(None)
+    ).all()
+    updated = 0
+    for txn in uncategorized:
+        new_category_id = categorize_transaction(
+            db,
+            household_id,
+            txn.description,
+            merchant=txn.merchant,
+            merchant_id=txn.merchant_id,
+            merchant_key=txn.merchant_key,
+        )
+        if new_category_id is not None:
+            txn.category_id = new_category_id
+            updated += 1
+    if updated:
+        db.commit()
+    if updated > 0:
+        print(f"[ingest_import] Recategorized {updated} transactions after import {import_id}")
+
     return {
         "imported_count": imported_count,
         "skipped_count": skipped_count,
         "warning_count": len(result.warnings),
         "warnings": result.warnings,
+        "recategorized_count": updated,
     }
