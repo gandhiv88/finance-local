@@ -16,6 +16,7 @@ from app.api import (
     reports,
     insights,
 )
+from app.ml.routes import router as ml_router
 
 app = FastAPI(title="Local Finance (Offline)")
 
@@ -48,3 +49,4 @@ app.include_router(rules.router, prefix="", tags=["rules"])
 app.include_router(learning.router, prefix="", tags=["learning"])
 app.include_router(reports.router, prefix="", tags=["reports"])
 app.include_router(insights.router, prefix="", tags=["insights"])
+app.include_router(ml_router)

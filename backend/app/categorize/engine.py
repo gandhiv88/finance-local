@@ -173,3 +173,45 @@ def get_or_create_category(
     db.add(category)
     db.flush()  # Get the ID without committing
     return category
+
+
+def categorize_transactions_with_ml(
+    db: Session,
+    household_id: int,
+    transactions: list,
+    min_confidence: float = 0.75,
+    force: bool = False,
+):
+    """
+    Apply ML categorization to uncategorized transactions after overrides and rules.
+    Only set category_id if not already set (unless force=True) and confidence >= min_confidence.
+    Returns dict: {overrides_applied, rules_applied, ml_applied}
+    """
+    from app.ml.predictor import load_model
+    import numpy as np
+    overrides_applied = 0
+    rules_applied = 0
+    ml_applied = 0
+    # Apply overrides and rules first (assume done externally)
+    # Now apply ML to remaining uncategorized
+    try:
+        model = load_model(household_id)
+    except Exception:
+        model = None
+    if not model:
+        return {"overrides_applied": overrides_applied, "rules_applied": rules_applied, "ml_applied": ml_applied}
+    for tx in transactions:
+        # Only apply if not categorized (unless force)
+        if not force and getattr(tx, "category_id", None):
+            continue
+        merchant = getattr(tx, "merchant", None)
+        desc = getattr(tx, "description", "")
+        text = f"{merchant} {desc}".strip() if merchant else desc
+        proba = model.predict_proba([text])[0]
+        classes = model.classes_
+        top_idx = int(np.argmax(proba))
+        confidence = float(proba[top_idx])
+        if confidence >= min_confidence:
+            tx.category_id = int(classes[top_idx])
+            ml_applied += 1
+    return {"overrides_applied": overrides_applied, "rules_applied": rules_applied, "ml_applied": ml_applied}

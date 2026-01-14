@@ -1,6 +1,6 @@
 import hashlib
 import re
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 
 from sqlalchemy.orm import Session
 
@@ -186,6 +186,7 @@ def ingest_import(db: Session, import_id: int) -> Dict:
         Transaction.category_id.is_(None)
     ).all()
     updated = 0
+    # Apply rules/overrides as before
     for txn in uncategorized:
         new_category_id = categorize_transaction(
             db,
@@ -198,10 +199,18 @@ def ingest_import(db: Session, import_id: int) -> Dict:
         if new_category_id is not None:
             txn.category_id = new_category_id
             updated += 1
-    if updated:
+    # ML categorization for remaining uncategorized
+    ml_applied = 0
+    try:
+        from app.categorize.engine import categorize_transactions_with_ml
+        ml_result = categorize_transactions_with_ml(db, household_id, uncategorized, min_confidence=0.75)
+        ml_applied = ml_result.get("ml_applied", 0)
+    except Exception as e:
+        print(f"[ingest_import] ML categorization skipped: {e}")
+    if updated or ml_applied:
         db.commit()
-    if updated > 0:
-        print(f"[ingest_import] Recategorized {updated} transactions after import {import_id}")
+    if updated > 0 or ml_applied > 0:
+        print(f"[ingest_import] Recategorized {updated} (rules) + {ml_applied} (ML) transactions after import {import_id}")
 
     return {
         "imported_count": imported_count,
@@ -209,4 +218,52 @@ def ingest_import(db: Session, import_id: int) -> Dict:
         "warning_count": len(result.warnings),
         "warnings": result.warnings,
         "recategorized_count": updated,
+        "ml_applied": ml_applied,
     }
+
+
+def get_training_examples(db: Session, household_id: int, exclude_income: bool = True, min_count: int = 5) -> List[tuple]:
+    """
+    Return list of (text, category_id) for ML training.
+    - text: merchant name (if present) + description
+    - category_id: must not be null
+    - exclude Income category (if requested)
+    - filter out categories with < min_count examples
+    """
+    from sqlalchemy import func
+    from ..models import Transaction, Category
+
+    # Get Income category id(s) for household
+    income_category_ids = []
+    if exclude_income:
+        income_cats = db.query(Category.id).filter(
+            Category.household_id == household_id,
+            func.lower(Category.name) == "income"
+        ).all()
+        income_category_ids = [row[0] for row in income_cats]
+
+    # Query transactions with category
+    query = db.query(
+        Transaction.description,
+        Transaction.merchant,
+        Transaction.category_id
+    ).filter(
+        Transaction.category_id.isnot(None),
+        Transaction.bank_account.has(household_id=household_id)
+    )
+    if income_category_ids:
+        query = query.filter(~Transaction.category_id.in_(income_category_ids))
+
+    rows = query.all()
+
+    # Build (text, category_id) pairs
+    examples = []
+    for desc, merchant, cat_id in rows:
+        text = f"{merchant} {desc}".strip() if merchant else desc
+        examples.append((text, cat_id))
+
+    # Filter out rare categories
+    from collections import Counter
+    cat_counts = Counter(cat_id for _, cat_id in examples)
+    filtered = [(text, cat_id) for text, cat_id in examples if cat_counts[cat_id] >= min_count]
+    return filtered

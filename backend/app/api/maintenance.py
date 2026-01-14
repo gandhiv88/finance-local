@@ -1,16 +1,20 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
+import os
+import numpy as np
 
 from ..db import get_db
 from ..models import BankAccount, Merchant, Transaction, User
 from ..auth.deps import require_roles
 from ..categorize.engine import categorize_transaction
 from ..categorize.merchant import extract_merchant_key, extract_display_name
+from app.ml.predictor import predict_category, load_model
 
 router = APIRouter(prefix="/maintenance", tags=["maintenance"])
 
 BATCH_SIZE = 500
+ML_MIN_CONFIDENCE = float(os.environ.get("ML_MIN_CONFIDENCE", 0.75))
 
 
 class RecategorizeResponse(BaseModel):
@@ -24,25 +28,31 @@ def recategorize_transactions(
 ) -> RecategorizeResponse:
     """
     Recompute categories for uncategorized or unreviewed transactions.
-    Processes in batches to avoid memory issues.
+    Applies overrides, merchant rules, then ML if model exists and confidence >= threshold.
+    Returns counts for each method.
     """
-    # Get household's bank account IDs
     account_ids = (
         db.query(BankAccount.id)
         .filter(BankAccount.household_id == current_user.household_id)
         .all()
     )
     account_ids = [a[0] for a in account_ids]
-
     if not account_ids:
         return RecategorizeResponse(updated=0)
 
     total_updated = 0
+    overrides_applied = 0
+    rules_applied = 0
+    ml_applied = 0
     offset = 0
 
+    # Try to load ML model once
+    try:
+        ml_model = load_model(current_user.household_id)
+    except Exception:
+        ml_model = None
+
     while True:
-        # Fetch batch of transactions to recategorize
-        # Target: uncategorized (category_id is None) or unreviewed
         transactions = (
             db.query(Transaction)
             .filter(
@@ -54,32 +64,56 @@ def recategorize_transactions(
             .offset(offset)
             .all()
         )
-
         if not transactions:
             break
-
         batch_updated = 0
         for txn in transactions:
+            # 1. Apply rules/overrides (existing logic)
             new_category_id = categorize_transaction(
                 db,
                 current_user.household_id,
                 txn.description,
                 txn.merchant,
             )
-            if new_category_id != txn.category_id:
+            if new_category_id is not None and new_category_id != txn.category_id:
                 txn.category_id = new_category_id
+                rules_applied += 1
                 batch_updated += 1
-
+                continue
+            # 2. ML for still-uncategorized
+            if txn.category_id is None and ml_model is not None:
+                text = f"{txn.merchant or ''} {txn.description}".strip()
+                try:
+                    if hasattr(ml_model.named_steps["clf"], "predict_proba"):
+                        probs = ml_model.predict_proba([text])[0]
+                        idx = int(np.argmax(probs))
+                        pred_cat = int(ml_model.classes_[idx])
+                        conf = float(probs[idx])
+                    else:
+                        pred_cat = int(ml_model.predict([text])[0])
+                        conf = 1.0
+                    if conf >= ML_MIN_CONFIDENCE:
+                        txn.category_id = pred_cat
+                        ml_applied += 1
+                        batch_updated += 1
+                except Exception:
+                    pass
         db.commit()
         total_updated += batch_updated
-
-        # If we got fewer than batch size, we're done
         if len(transactions) < BATCH_SIZE:
             break
-
         offset += BATCH_SIZE
-
-    return RecategorizeResponse(updated=total_updated)
+    # Optionally, return all counts
+    class RecategorizeFullResponse(RecategorizeResponse):
+        overrides_applied: int = 0
+        rules_applied: int = 0
+        ml_applied: int = 0
+    return RecategorizeFullResponse(
+        updated=total_updated,
+        overrides_applied=overrides_applied,
+        rules_applied=rules_applied,
+        ml_applied=ml_applied,
+    )
 
 
 class BackfillMerchantsResponse(BaseModel):
